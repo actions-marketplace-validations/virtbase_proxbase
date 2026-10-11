@@ -21,6 +21,7 @@ const (
 	slotNAT     = 0x04
 	slotNICBase = 0x05 // up to 8 segment NICs: 0x05..0x0c
 	slotRNG     = 0x0e
+	slotBalloon = 0x0f
 	slotData    = 0x10 // up to 8 data disks: 0x10..0x17
 )
 
@@ -41,10 +42,23 @@ func qemuLog(s vm.Spec) string    { return filepath.Join(s.LogDir, s.Name+"-qemu
 // ConsoleSocket is the serial console of a running node (proxbase console).
 func ConsoleSocket(s vm.Spec) string { return console(s) }
 
+// driveOpts: guest flushes are ignored (nodes are disposable), and discards and
+// zero writes free space in the image.
+const driveOpts = "cache=unsafe,discard=unmap,detect-zeroes=unmap"
+
 func dev(format string, a ...any) []string { return []string{"-device", fmt.Sprintf(format, a...)} }
 
-// args returns the command line; media != nil boots the installer.
-func args(s vm.Spec, media *vm.Media) []string {
+// boot selects how a node is started.
+type boot int
+
+const (
+	bootDaemon  boot = iota // installed node, daemonized with a console socket
+	bootInstall             // the installer from media, in the foreground
+	bootOnce                // installed node in the foreground until it powers off
+)
+
+// args returns the command line; media is only used by bootInstall.
+func args(s vm.Spec, b boot, media *vm.Media) []string {
 	cpu := "host"
 	if !s.Nested {
 		cpu += ",vmx=off,svm=off"
@@ -59,7 +73,7 @@ func args(s vm.Spec, media *vm.Media) []string {
 		"-display", "none",
 	}
 	a = append(a, dev("VGA,bus=pcie.0,addr=%#x", slotVGA)...)
-	a = append(a, "-drive", "if=none,id=root,file="+s.RootDisk.Path+",format=qcow2,cache=unsafe,discard=unmap")
+	a = append(a, "-drive", "if=none,id=root,file="+s.RootDisk.Path+",format=qcow2,"+driveOpts)
 	a = append(a, dev("virtio-blk-pci,drive=root,bus=pcie.0,addr=%#x,bootindex=1", slotRoot)...)
 	a = append(a, dev("qemu-xhci,id=usb,bus=pcie.0,addr=%#x", slotUSB)...)
 	fwd := fmt.Sprintf("hostfwd=tcp:%[1]s:%[2]d-10.0.2.15:22,hostfwd=tcp:%[1]s:%[3]d-10.0.2.15:8006", s.Bind, s.SSHPort, s.UIPort)
@@ -72,13 +86,20 @@ func args(s vm.Spec, media *vm.Media) []string {
 	}
 	a = append(a, "-object", "rng-random,id=rng,filename=/dev/urandom")
 	a = append(a, dev("virtio-rng-pci,rng=rng,bus=pcie.0,addr=%#x", slotRNG)...)
+	// Free page reporting hands memory the guest freed back to the host.
+	a = append(a, dev("virtio-balloon-pci,id=balloon,free-page-reporting=on,bus=pcie.0,addr=%#x", slotBalloon)...)
 	for i, d := range s.DataDisks {
-		a = append(a, "-drive", fmt.Sprintf("if=none,id=data%d,file=%s,format=qcow2,cache=unsafe,discard=unmap", i, d.Path))
+		a = append(a, "-drive", fmt.Sprintf("if=none,id=data%d,file=%s,format=qcow2,%s", i, d.Path, driveOpts))
 		a = append(a, dev("virtio-blk-pci,drive=data%d,bus=pcie.0,addr=%#x", i, slotData+i)...)
 	}
 	a = append(a, "-qmp", "unix:"+qmpSocket(s)+",server=on,wait=off", "-pidfile", pidfile(s))
 
-	if media != nil {
+	for _, f := range s.Files {
+		a = append(a, "-fw_cfg", "name="+f.Name+",file="+f.Path)
+	}
+
+	switch b {
+	case bootInstall:
 		a = append(a,
 			"-drive", "if=none,id=cd,media=cdrom,readonly=on,file="+media.ISO,
 			"-device", "ide-cd,drive=cd,bus=ide.0",
@@ -89,12 +110,21 @@ func args(s vm.Spec, media *vm.Media) []string {
 			"-serial", "chardev:ser0",
 			"-no-reboot",
 		)
-	} else {
+	case bootOnce:
+		a = append(a,
+			"-chardev", "file,id=ser0,path="+consoleLog(s),
+			"-serial", "chardev:ser0",
+			"-no-reboot",
+		)
+	default:
 		a = append(a,
 			"-chardev", "socket,id=ser0,path="+console(s)+",server=on,wait=off,logfile="+consoleLog(s)+",logappend=on",
 			"-serial", "chardev:ser0",
 			"-daemonize",
 		)
+		if s.LoadSnapshot != "" {
+			a = append(a, "-loadvm", s.LoadSnapshot, "-S")
+		}
 	}
 	return a
 }

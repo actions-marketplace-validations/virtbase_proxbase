@@ -14,9 +14,13 @@ import (
 	"github.com/virtbase/proxbase/internal/retry"
 )
 
-// postInstall configures host names, repositories and bridges on every node and,
-// if configured, upgrades them (rebooting into a new kernel).
-func (c *Cluster) postInstall(ctx context.Context) error {
+// postInstall puts every node into provisioning mode (fast, unsafe writes until
+// endProvisioning) and configures it; see configureNodes.
+func (c *Cluster) postInstall(ctx context.Context) error { return c.configureNodes(ctx, true) }
+
+// configureNodes configures host names, repositories and bridges on every node
+// and, if configured, upgrades them (rebooting into a new kernel).
+func (c *Cluster) configureNodes(ctx context.Context, provisioning bool) error {
 	g, gctx := errgroup.WithContext(ctx)
 	for _, n := range c.Cfg.NodeList() {
 		g.Go(func() error {
@@ -25,7 +29,11 @@ func (c *Cluster) postInstall(ctx context.Context) error {
 				return err
 			}
 			defer s.Close()
-			out, err := s.Run(nodesetup.Script(c.Cfg, n))
+			script := nodesetup.Script(c.Cfg, n)
+			if provisioning {
+				script = nodesetup.ProvisionStart + script
+			}
+			out, err := s.Run(script)
 			if err != nil {
 				return fmt.Errorf("%s: post-install: %w", n.Name, err)
 			}
@@ -36,12 +44,31 @@ func (c *Cluster) postInstall(ctx context.Context) error {
 				return nil
 			}
 			t0 := time.Now()
-			out, err = s.Run(nodesetup.Upgrade)
+			out, err = s.Run(c.aptEnv() + nodesetup.Upgrade)
 			if err != nil {
 				return fmt.Errorf("%s: dist-upgrade: %w", n.Name, err)
 			}
 			c.step("%s: dist-upgrade in %s: %s", n.Name, time.Since(t0).Round(time.Second), strings.TrimSpace(out))
 			return c.rebootForKernel(gctx, n.Name, s)
+		})
+	}
+	return g.Wait()
+}
+
+// endProvisioning restores safe writes on every node (see nodesetup.ProvisionEnd).
+func (c *Cluster) endProvisioning(ctx context.Context) error {
+	g, gctx := errgroup.WithContext(ctx)
+	for _, n := range c.Cfg.NodeList() {
+		g.Go(func() error {
+			s, err := c.waitSSH(gctx, n.Name, time.Minute)
+			if err != nil {
+				return err
+			}
+			defer s.Close()
+			if _, err := s.Run(nodesetup.ProvisionEnd); err != nil {
+				return fmt.Errorf("%s: end provisioning: %w", n.Name, err)
+			}
+			return nil
 		})
 	}
 	return g.Wait()
@@ -60,7 +87,7 @@ func (c *Cluster) rebootForKernel(ctx context.Context, name string, s *remote.SS
 		return err
 	}
 	var running string
-	err = retry.Do(ctx, 5*time.Minute, 5*time.Second, func() error {
+	err = retry.Do(ctx, 5*time.Minute, time.Second, func() error {
 		ns, err := c.ssh(ctx, name)
 		if err != nil {
 			return err
