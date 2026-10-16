@@ -64,10 +64,16 @@ func (c *Cluster) dial(ctx context.Context, name string, signer ssh.Signer, host
 }
 
 // ssh connects to a node, trusting its host key on first use. Nodes cloned from
-// a base image are reached with the base image's key until personalized.
+// a base image are not pinned until personalized: they get the cluster key on
+// their first boot (first-boot hook), or, from base images older than the hook,
+// accept only the base image's key until personalized over SSH.
 func (c *Cluster) ssh(ctx context.Context, name string) (*remote.SSH, error) {
 	ns := c.St.Node(name)
 	if ns.Pending {
+		s, err := c.dial(ctx, name, c.signer, "")
+		if err == nil || !isAuthError(err) {
+			return s, err
+		}
 		base, err := golden.Open(ns.Base)
 		if err != nil {
 			return nil, retry.Permanent(err)
@@ -92,7 +98,7 @@ func (c *Cluster) ssh(ctx context.Context, name string) (*remote.SSH, error) {
 // waitSSH waits until a node accepts SSH logins; a changed host key ends the wait.
 func (c *Cluster) waitSSH(ctx context.Context, name string, timeout time.Duration) (*remote.SSH, error) {
 	var s *remote.SSH
-	err := retry.Do(ctx, timeout, 2*time.Second, func() error {
+	err := retry.Do(ctx, timeout, time.Second, func() error {
 		var err error
 		s, err = c.ssh(ctx, name)
 		if err != nil && strings.Contains(err.Error(), "host key") {
@@ -182,3 +188,11 @@ func (h host) SSH(ctx context.Context, node string) (*remote.SSH, error) {
 }
 
 func (h host) Step(format string, a ...any) { h.c.step(format, a...) }
+
+func (h host) AptEnv() string { return h.c.aptEnv() }
+
+// isAuthError reports whether an SSH dial failed because the key was rejected
+// (as opposed to the node not being up yet).
+func isAuthError(err error) bool {
+	return strings.Contains(err.Error(), "unable to authenticate")
+}

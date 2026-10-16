@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/virtbase/proxbase/internal/aptcache"
 	"github.com/virtbase/proxbase/internal/config"
 	"github.com/virtbase/proxbase/internal/image"
 	"github.com/virtbase/proxbase/internal/network"
@@ -68,6 +69,15 @@ func (c *Cluster) create(ctx context.Context) error {
 	if err := c.save(); err != nil {
 		return err
 	}
+	if *c.Cfg.Proxmox.AptCache {
+		if c.apt, err = aptcache.Start(filepath.Join(state.CacheHome(), "apt")); err != nil {
+			return err
+		}
+		defer func() {
+			c.apt.Close()
+			c.apt = nil
+		}()
+	}
 	steps := []func(context.Context) error{
 		func(context.Context) error { return c.net.Start(c.Cfg) },
 		func(ctx context.Context) error { return c.installAll(ctx, img) },
@@ -76,9 +86,11 @@ func (c *Cluster) create(ctx context.Context) error {
 		c.postInstall,
 		c.formCluster,
 		func(ctx context.Context) error { return c.waitQuorum(ctx, 5*time.Minute) },
+		c.repairJoins,
 		c.setupStorage,
 		c.ensureToken,
 		c.exportCA,
+		c.endProvisioning,
 	}
 	for _, step := range steps {
 		if err := step(ctx); err != nil {
