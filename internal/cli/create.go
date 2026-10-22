@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -11,9 +13,23 @@ import (
 )
 
 type createOpts struct {
-	file, memory, disk, dataDisks, storage, version, output, bind string
-	nodes, cpus                                                   int
-	dryRun, golden                                                bool
+	file, memory, disk, dataDisks, storage, version, output, bind, snapshot string
+	nodes, cpus                                                             int
+	dryRun, golden                                                          bool
+}
+
+// saveBaseline saves the live snapshot name of a created cluster, unless name
+// is empty or the snapshot exists (a create that is run again).
+func saveBaseline(ctx context.Context, c *cluster.Cluster, name string) error {
+	if name == "" || c.St.Snapshot(name) != nil {
+		return nil
+	}
+	t0 := time.Now()
+	if err := c.SnapshotSaveLive(ctx, name); err != nil {
+		return fmt.Errorf("save snapshot %s: %w", name, err)
+	}
+	logf("live snapshot %s saved in %s", name, time.Since(t0).Round(time.Second))
+	return nil
 }
 
 func createCmd() *cobra.Command {
@@ -28,6 +44,11 @@ func createCmd() *cobra.Command {
 				return err
 			}
 			if o.dryRun {
+				plan, err := cluster.NewPlan(cfg)
+				if err != nil {
+					return err
+				}
+				logPlan(plan)
 				if o.output == "json" {
 					return printJSON(cfg)
 				}
@@ -38,18 +59,40 @@ func createCmd() *cobra.Command {
 				_, err = os.Stdout.Write(b)
 				return err
 			}
+			if o.snapshot != "" {
+				if err := cluster.CheckSnapshotName(o.snapshot); err != nil {
+					return err
+				}
+			}
 			c, err := cluster.Create(cmd.Context(), cfg, sink)
 			if err != nil {
 				return createError(c, err)
 			}
 			logf("created in %s", c.St.Duration)
+			if err := saveBaseline(cmd.Context(), c, o.snapshot); err != nil {
+				return err
+			}
 			return printStatus(c.Status(cmd.Context()), o.output)
 		},
 	}
 	o.addFlags(cmd)
 	cmd.Flags().BoolVar(&o.dryRun, "dry-run", false, "print the resolved cluster file and exit")
+	cmd.Flags().StringVar(&o.snapshot, "snapshot", "", "save a live snapshot with this name when the cluster is ready (kept if it exists)")
 	cmd.Flags().StringVarP(&o.output, "output", "o", "table", "output format: table|json (with --dry-run: yaml|json)")
 	return cmd
+}
+
+// logPlan summarizes what a create would set up.
+func logPlan(p *cluster.Plan) {
+	last := p.Nodes[len(p.Nodes)-1]
+	logf("plan: %d node(s), %.1f GiB memory, %d GiB of thin disks, web UI from %s, SSH from port %d; ISO %s",
+		len(p.Nodes), float64(p.MemoryMiB)/1024, p.DiskMiB>>10, p.Nodes[0].UI, p.Nodes[0].SSHPort, map[bool]string{true: "cached", false: "to download"}[p.ISOCached])
+	if len(p.Nodes) > 1 {
+		logf("plan: last node %s at %s, SSH port %d", last.Name, last.UI, last.SSHPort)
+	}
+	for _, w := range p.Warnings {
+		logf("warning: %s", w)
+	}
 }
 
 // createError tells how to go on after a failed create of an initialized cluster.

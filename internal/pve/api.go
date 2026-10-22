@@ -103,7 +103,7 @@ func (c *Client) Login(ctx context.Context, user, password string) error {
 		Ticket string `json:"ticket"`
 		CSRF   string `json:"CSRFPreventionToken"`
 	}
-	if err := c.do(ctx, http.MethodPost, "/access/ticket", url.Values{"username": {user}, "password": {password}}, &out); err != nil {
+	if _, err := c.do(ctx, http.MethodPost, "/access/ticket", url.Values{"username": {user}, "password": {password}}, &out); err != nil {
 		return err
 	}
 	c.mu.Lock()
@@ -146,27 +146,39 @@ func (c *Client) Delete(ctx context.Context, path string) error {
 // right after a node joined a cluster, tickets can briefly fail to verify while
 // the cluster's auth key reaches it.
 func (c *Client) Do(ctx context.Context, method, path string, form url.Values, out any) error {
-	err := c.do(ctx, method, path, form, out)
+	_, err := c.doRelogin(ctx, method, path, form, out)
+	return err
+}
+
+// GetPage is Get for paged lists: it also returns the number of entries in
+// all pages, which the API reports next to the data.
+func (c *Client) GetPage(ctx context.Context, path string, out any) (total int, err error) {
+	return c.doRelogin(ctx, http.MethodGet, path, nil, out)
+}
+
+func (c *Client) doRelogin(ctx context.Context, method, path string, form url.Values, out any) (int, error) {
+	total, err := c.do(ctx, method, path, form, out)
 	c.mu.Lock()
 	user, password := c.user, c.password
 	c.mu.Unlock()
 	if !IsStatus(err, http.StatusUnauthorized) || c.token != "" || user == "" {
-		return err
+		return total, err
 	}
 	if lerr := c.Login(ctx, user, password); lerr != nil {
-		return errors.Join(err, lerr)
+		return 0, errors.Join(err, lerr)
 	}
 	return c.do(ctx, method, path, form, out)
 }
 
-func (c *Client) do(ctx context.Context, method, path string, form url.Values, out any) error {
+// do sends one request and returns the total the response reports, if any.
+func (c *Client) do(ctx context.Context, method, path string, form url.Values, out any) (int, error) {
 	var body io.Reader
 	if form != nil {
 		body = strings.NewReader(form.Encode())
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if form != nil {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -185,12 +197,12 @@ func (c *Client) do(ctx context.Context, method, path string, form url.Values, o
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if resp.StatusCode/100 != 2 {
 		msg := strings.TrimSpace(resp.Status)
@@ -206,44 +218,38 @@ func (c *Client) do(ctx context.Context, method, path string, form url.Values, o
 				msg += fmt.Sprintf("; %s: %s", k, strings.TrimSpace(v))
 			}
 		}
-		return &APIError{Status: resp.StatusCode, Msg: msg}
+		return 0, &APIError{Status: resp.StatusCode, Msg: msg}
 	}
 	if out == nil {
-		return nil
+		return 0, nil
 	}
 	var env struct {
-		Data json.RawMessage `json:"data"`
+		Data  json.RawMessage `json:"data"`
+		Total int             `json:"total"`
 	}
 	if err := json.Unmarshal(b, &env); err != nil {
-		return fmt.Errorf("%s %s: %w", method, path, err)
+		return 0, fmt.Errorf("%s %s: %w", method, path, err)
 	}
 	if len(env.Data) == 0 || bytes.Equal(env.Data, []byte("null")) {
-		return nil
+		return env.Total, nil
 	}
-	return json.Unmarshal(env.Data, out)
+	return env.Total, json.Unmarshal(env.Data, out)
 }
 
 // TaskDone reports whether a task has stopped and, if it failed, its error with the log tail.
 func (c *Client) TaskDone(ctx context.Context, node, upid string) (bool, error) {
-	var st struct {
-		Status     string `json:"status"`
-		ExitStatus string `json:"exitstatus"`
-	}
-	if err := c.Get(ctx, "/nodes/"+node+"/tasks/"+url.PathEscape(upid)+"/status", &st); err != nil || st.Status != "stopped" {
+	st, err := c.TaskStatus(ctx, node, upid)
+	if err != nil || !st.Stopped() {
 		return false, nil
 	}
-	if st.ExitStatus == "OK" || strings.HasPrefix(st.ExitStatus, "WARNINGS") {
+	if st.OK() {
 		return true, nil
 	}
-	var lines []struct {
-		T string `json:"t"`
+	lines, _, _ := c.TaskLogTail(ctx, node, upid, 20)
+	for i, l := range lines {
+		lines[i] = "  " + l
 	}
-	_ = c.Get(ctx, "/nodes/"+node+"/tasks/"+url.PathEscape(upid)+"/log?limit=20", &lines)
-	var log []string
-	for _, l := range lines {
-		log = append(log, "  "+l.T)
-	}
-	return true, fmt.Errorf("task failed: %s\n%s", st.ExitStatus, strings.Join(log, "\n"))
+	return true, fmt.Errorf("task failed: %s\n%s", st.ExitStatus, strings.Join(lines, "\n"))
 }
 
 // WaitTask waits for a UPID to finish and returns an error unless it ended OK.
@@ -251,13 +257,9 @@ func (c *Client) WaitTask(ctx context.Context, node, upid string, timeout time.D
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	for {
-		var st struct {
-			Status     string `json:"status"`
-			ExitStatus string `json:"exitstatus"`
-		}
-		err := c.Get(ctx, "/nodes/"+node+"/tasks/"+url.PathEscape(upid)+"/status", &st)
-		if err == nil && st.Status == "stopped" {
-			if st.ExitStatus != "OK" && !strings.HasPrefix(st.ExitStatus, "WARNINGS") {
+		st, err := c.TaskStatus(ctx, node, upid)
+		if err == nil && st.Stopped() {
+			if !st.OK() {
 				return fmt.Errorf("task %s failed: %s", upid, st.ExitStatus)
 			}
 			return nil

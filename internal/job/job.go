@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/virtbase/proxbase/internal/config"
 	"github.com/virtbase/proxbase/internal/progress"
@@ -43,6 +44,8 @@ func (j Job) Log() string { return j.file(".jsonl") }
 
 func (j Job) pidFile() string { return j.file(".pid") }
 
+func (j Job) cmdFile() string { return j.file(".cmd") }
+
 func (j Job) file(ext string) string { return filepath.Join(dir(), j.cluster+ext) }
 
 // WriteInput stores the cluster file for the job and returns its path.
@@ -58,13 +61,16 @@ func (j Job) WriteInput(data []byte) (string, error) {
 // exited is closed when the job ends, if the caller lives that long.
 func (j Job) Start(args ...string) (exited <-chan struct{}, err error) {
 	if pid := j.PID(); pid != 0 {
-		return nil, fmt.Errorf("a job for cluster %s is already running (pid %d)", j.cluster, pid)
+		return nil, fmt.Errorf("%q is already running for cluster %s (pid %d)", j.Command(), j.cluster, pid)
 	}
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, err
 	}
 	if err := os.MkdirAll(dir(), 0o755); err != nil {
+		return nil, err
+	}
+	if err := state.WriteFileAtomic(j.cmdFile(), []byte(strings.Join(args, " ")), 0o644); err != nil {
 		return nil, err
 	}
 	log, err := os.Create(j.Log())
@@ -81,6 +87,7 @@ func (j Job) Start(args ...string) (exited <-chan struct{}, err error) {
 	if err := state.WriteFileAtomic(j.pidFile(), []byte(strconv.Itoa(cmd.Process.Pid)), 0o644); err != nil {
 		_ = cmd.Process.Kill()
 	}
+	waitVisible(cmd.Process.Pid)
 	done := make(chan struct{})
 	go func() {
 		_ = cmd.Wait() // reap, so PID does not see a zombie
@@ -88,6 +95,15 @@ func (j Job) Start(args ...string) (exited <-chan struct{}, err error) {
 		close(done)
 	}()
 	return done, err
+}
+
+// Command is the proxbase command line of the latest job, e.g. "node add lab --count 1".
+func (j Job) Command() string {
+	b, err := os.ReadFile(j.cmdFile())
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // PID returns the process ID of the running job, or 0.
@@ -101,10 +117,28 @@ func (j Job) PID() int {
 		return 0
 	}
 	// Guard against PID reuse where /proc exists.
-	if cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); err == nil && !bytes.Contains(cmdline, []byte("--progress\x00json")) {
+	if cmdline, err := os.ReadFile(cmdlinePath(pid)); err == nil && !bytes.Contains(cmdline, jobMarker) {
 		return 0
 	}
 	return pid
+}
+
+// jobMarker is in the command line of every job.
+var jobMarker = []byte("--progress\x00json")
+
+func cmdlinePath(pid int) string { return fmt.Sprintf("/proc/%d/cmdline", pid) }
+
+// waitVisible waits up to a second until the command line of the just started
+// process pid shows that it is a job. Go starts processes with vfork, and the
+// kernel resumes the parent during execve, before it sets the new command line,
+// so for a moment PID would not recognize the job.
+func waitVisible(pid int) {
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		cmdline, err := os.ReadFile(cmdlinePath(pid))
+		if err != nil || bytes.Contains(cmdline, jobMarker) {
+			return
+		}
+	}
 }
 
 // Signal sends sig to the running job, if any.
@@ -117,7 +151,7 @@ func (j Job) Signal(sig syscall.Signal) error {
 
 // Remove deletes the job's files.
 func (j Job) Remove() {
-	for _, p := range []string{j.Log(), j.pidFile(), j.file(".yaml")} {
+	for _, p := range []string{j.Log(), j.pidFile(), j.cmdFile(), j.file(".yaml")} {
 		_ = os.Remove(p)
 	}
 }

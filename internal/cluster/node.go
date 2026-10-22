@@ -47,6 +47,16 @@ func (c *Cluster) spec(n config.Node) vm.Spec {
 
 func (c *Cluster) running(n config.Node) bool { return c.runtime.Running(c.spec(n)) }
 
+// NodeRunning reports whether the VM of the node name is running.
+func (c *Cluster) NodeRunning(name string) bool {
+	for _, n := range c.Cfg.NodeList() {
+		if n.Name == name {
+			return c.running(n)
+		}
+	}
+	return false
+}
+
 func nodeIP(n config.Node, net config.Network) string {
 	ip, _, _ := config.NodeIP(net.CIDR, n.Index)
 	return ip.String()
@@ -142,13 +152,9 @@ func (c *Cluster) api(ctx context.Context, name string) (*pve.Client, error) {
 
 // Exec runs a command as root on a running node.
 func (c *Cluster) Exec(ctx context.Context, name, command string) (remote.ExecResult, error) {
-	ns := c.St.Node(name)
-	if ns == nil {
-		return remote.ExecResult{}, fmt.Errorf("cluster %s has no node %q", c.Cfg.Name, name)
-	}
-	s, err := c.ssh(ctx, name)
+	s, err := c.nodeSSH(ctx, name)
 	if err != nil {
-		return remote.ExecResult{}, fmt.Errorf("%s: SSH: %w", name, err)
+		return remote.ExecResult{}, err
 	}
 	defer s.Close()
 	return s.Exec(ctx, command)
@@ -172,6 +178,31 @@ func (c *Cluster) tokenClient(port int) *pve.Client {
 	cl := pve.NewClientCA(port, pool)
 	cl.SetToken(tok)
 	return cl
+}
+
+// TokenAPI returns an API client for node that uses the API token. Without
+// node it picks the first running node.
+func (c *Cluster) TokenAPI(node string) (*pve.Client, error) {
+	if node == "" {
+		for _, n := range c.Cfg.NodeList() {
+			if c.running(n) {
+				node = n.Name
+				break
+			}
+		}
+		if node == "" {
+			return nil, fmt.Errorf("cluster %s has no running node; start it first", c.Cfg.Name)
+		}
+	}
+	ns := c.St.Node(node)
+	if ns == nil {
+		return nil, fmt.Errorf("cluster %s has no node %q", c.Cfg.Name, node)
+	}
+	cl := c.tokenClient(ns.UIPort)
+	if cl == nil {
+		return nil, fmt.Errorf("cluster %s has no API token yet (create not finished or access.apiToken: false)", c.Cfg.Name)
+	}
+	return cl, nil
 }
 
 // host gives storage backends access to the cluster.

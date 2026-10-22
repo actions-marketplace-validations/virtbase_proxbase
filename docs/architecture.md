@@ -13,8 +13,12 @@ flowchart TD
     cli --> config
     cli --> network
     cli --> mcpserver["mcpserver<br/>MCP tools"]
+    cli --> selfupdate["selfupdate<br/>proxbase upgrade"]
     mcpserver --> cluster
-    mcpserver --> job["job<br/>detached creates"]
+    mcpserver --> job["job<br/>detached creates, node changes"]
+    cli --> doctor["doctor<br/>host checks"]
+    mcpserver --> doctor
+    mcpserver --> golden
     cluster --> progress["progress<br/>events, text/JSON sinks"]
     job --> progress
     cluster["cluster<br/>orchestration"] --> vm
@@ -64,8 +68,10 @@ flowchart TD
 | `golden` | Cached base images: build, bake, and the personalization of clones from older images |
 | `cluster` | Orchestration: create, lifecycle, nodes, snapshots, faults, status, exec |
 | `progress` | Progress events and sinks: text, JSON lines, MCP notifications |
-| `job` | Runs a create detached from its caller, with a JSON-lines progress log |
+| `job` | Runs a create or node change detached from its caller, with a JSON-lines progress log |
+| `doctor` | Host checks of `proxbase doctor` and the `host_check` tool |
 | `mcpserver` | MCP server (`proxbase mcp`): tools, the schema resource, progress forwarding |
+| `selfupdate` | `proxbase upgrade`: find a GitHub release, verify it (SHA-256, cosign), detect package-manager installs, replace the binary atomically |
 | `cli` | Commands, flags and output |
 
 Extension points are small interfaces: a new hypervisor implements `vm.Runtime` (and
@@ -84,7 +90,7 @@ sequenceDiagram
     participant VM as QEMU (per node)
     participant Node as node (SSH)
     participant API as Proxmox API
-    CLI->>Img: ISO + SHA256SUMS (cached, verified; no network for a cached exact version)
+    CLI->>Img: ISO + SHA256SUMS (cached and verified, no network for a cached exact version)
     CLI->>SW: start proxbase _switch
     par every node
         CLI->>VM: install: -kernel/-initrd, answer disk PROXMOX-AIS
@@ -93,7 +99,7 @@ sequenceDiagram
         VM->>CLI: fetch the first-boot hook (HTTP on 10.0.2.2)
         VM-->>CLI: power off = installed
     end
-    CLI->>VM: boot nodes (daemonized); clones get their identity as fw_cfg file
+    CLI->>VM: boot nodes (daemonized), clones get their identity as fw_cfg file
     Note over VM: first boot: hook runs before networking
     CLI->>Node: provisioning mode, hosts, repositories, bridges (nodesetup)
     CLI->>API: create cluster on node 1, join the others
@@ -102,6 +108,12 @@ sequenceDiagram
     CLI->>API: API token, export CA
     CLI->>Node: end provisioning mode
 ```
+
+A new cluster first gets its ports: without `access.portBase` it takes the first
+base from 18000 in steps of 1000 whose ports are free and that no other cluster,
+running or stopped, uses. Creates hold a host lock (`new.lock`) from that choice until
+the cluster file claiming the range is written, so parallel creates do not collide;
+capacity shortages (memory, disk) are logged as warnings.
 
 Each step checks first and skips what is done, so a failed create resumes when run
 again. Progress (`installed` per node, phase, errors) is kept in `state.json`.
@@ -153,9 +165,10 @@ sequenceDiagram
     Agent->>MCP: cluster_wait (if still running)
 ```
 
-The create runs as a separate process so it survives client timeouts and restarts
-of the MCP server; everything else (`node_exec`, `cluster_start`, snapshots, faults)
-runs in the server process, guarded by the same cluster lock as the CLI.
+Creates and node changes (`node_add`, `node_remove`) run as a separate process so
+they survive client timeouts and restarts of the MCP server; everything else
+(`node_exec`, files, the API tools, `cluster_start`, snapshots, faults) runs in the
+server process, guarded by the same cluster lock as the CLI.
 
 ## Nodes
 
@@ -189,7 +202,8 @@ runs in the server process, guarded by the same cluster lock as the CLI.
 ├── disks/              <node>-root.qcow2, <node>-dataN.qcow2
 ├── run/                pidfiles, QMP/console sockets, switch and NIC sockets
 └── logs/               install, console, QEMU and switch logs
-~/.local/share/proxbase/jobs/  <cluster>.jsonl, .pid, .yaml of creates started over MCP
+~/.local/share/proxbase/new.lock   held while a new cluster chooses its ports
+~/.local/share/proxbase/jobs/  <cluster>.jsonl, .pid, .cmd, .yaml of jobs started over MCP
 ~/.cache/proxbase/iso/     ISOs, SHA256SUMS, extracted installer files
 ~/.cache/proxbase/images/  golden base images (create --golden)
 ~/.cache/proxbase/apt/     packages served to the nodes (unused for 30 days: removed)

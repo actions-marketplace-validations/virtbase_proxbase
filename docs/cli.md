@@ -32,7 +32,8 @@ Flags of `create` and `up` (they override fields of the file, see
 | `--pve-version` | ISO version: `9.2` or `9.2-1` |
 | `--golden` | Clone nodes from a cached base image ([golden images](golden-images.md)) |
 | `--bind-address` | Address of the UI/SSH forwards (default `$PROXBASE_BIND_ADDRESS` or `127.0.0.1`) |
-| `--dry-run` | `create` only: print the resolved file (`-o yaml\|json`) |
+| `--dry-run` | `create` only: print the resolved file with the port base it would take (`-o yaml\|json`) and log the plan: ports, memory, disk, capacity warnings |
+| `--snapshot` | `create` only: save a live snapshot with this name when the cluster is ready (kept if it exists) |
 | `-o, --output` | `create` only: `table` or `json` |
 | `--stop-timeout` | `up` only: clean shutdown time on SIGTERM (default 2m) |
 
@@ -68,9 +69,10 @@ See [fault-injection.md](fault-injection.md).
 | Command | Description |
 | --- | --- |
 | `ssh [cluster] [node] [-- command…]` | SSH as root (default: first node) |
+| `cp <source> <destination>` | Copy a file to or from a node: `[cluster:]node:/path`, a local path or `-` (`--mode`) |
 | `console [cluster] <node>` | Serial console, Ctrl-] to detach |
 | `env [cluster]` | API endpoint and credentials: `--format shell\|json\|terraform`, `--export <dir>` |
-| `mcp` | MCP server on stdio for AI agents ([mcp.md](mcp.md)) |
+| `mcp` | MCP server on stdio for AI agents (`--call-timeout`, see [mcp.md](mcp.md#call-timeouts)) |
 
 ## Host and files
 
@@ -82,8 +84,13 @@ See [fault-injection.md](fault-injection.md).
 | `config init [file]` | Write an annotated example (`--force` to overwrite) |
 | `config validate <file>` | Strictly parse and check a cluster file |
 | `config schema` | Print the JSON schema |
+| `upgrade` | Upgrade proxbase itself to the latest release (`--version`, `--check`, `--yes`, `--allow-downgrade`, `--signature auto\|require\|skip`); see [upgrading](install.md#upgrading) |
 | `version` | Print the version |
 | `completion <shell>` | Shell completion script |
+
+`upgrade --check` exits with 0 when proxbase is up to date and 100 when a newer
+release exists, 1 on errors; `upgrade` without a terminal needs `--yes`. Installs that
+a package manager owns are not replaced: `upgrade` prints the command to use.
 
 ## Environment
 
@@ -92,3 +99,6 @@ See [fault-injection.md](fault-injection.md).
 | `XDG_DATA_HOME` | Cluster state in `$XDG_DATA_HOME/proxbase/clusters`, MCP create jobs in `…/proxbase/jobs` (default `~/.local/share`) |
 | `XDG_CACHE_HOME` | ISO cache in `$XDG_CACHE_HOME/proxbase/iso` (default `~/.cache`) |
 | `PROXBASE_BIND_ADDRESS` | Default for `access.bindAddress` of new clusters |
+| `GITHUB_TOKEN`, `GH_TOKEN` | `upgrade`: token for the GitHub API (higher rate limit) |
+| `PROXBASE_INSTALL_METHOD` | `upgrade`: how proxbase was installed, overriding the detection: `binary` (replace in place), `homebrew`, `deb`, `rpm`, `apk`, `go`, `container`, `action` |
+| `PROXBASE_UPGRADE_URL` | `upgrade`: GitHub API base URL instead of `https://api.github.com`, for mirrors and tests (gets no token) |
