@@ -35,29 +35,8 @@ func Execute() int {
 	if bi, ok := debug.ReadBuildInfo(); ok && version == "dev" && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
 		version = bi.Main.Version
 	}
-	var format string
-	root := &cobra.Command{
-		Use:           "proxbase",
-		Short:         "Proxmox VE clusters in QEMU/KVM, for labs and CI",
-		SilenceUsage:  true,
-		SilenceErrors: true,
-		PersistentPreRunE: func(*cobra.Command, []string) error {
-			switch format {
-			case "text":
-			case "json":
-				sink = progress.JSON(os.Stderr)
-			default:
-				return fmt.Errorf("--progress must be text or json")
-			}
-			return nil
-		},
-	}
-	root.PersistentFlags().StringVar(&format, "progress", "text", "progress and messages on stderr: text or json (one JSON object per line)")
-	root.AddCommand(createCmd(), listCmd(), statusCmd(), startCmd(), stopCmd(), destroyCmd(),
-		upCmd(), nodeCmd(), snapshotCmd(), faultCmd(), imageCmd(), sshCmd(), consoleCmd(),
-		envCmd(), cpCmd(), ttlCmd(), gcCmd(), doctorCmd(), configCmd(), upgradeCmd(), versionCmd(), switchCmd(), mcpCmd())
 	t0 := time.Now()
-	err := root.ExecuteContext(ctx)
+	err := Command().ExecuteContext(ctx)
 	e := progress.Event{Time: time.Now(), Type: progress.TypeDone, Elapsed: time.Since(t0).Seconds()}
 	if code, ok := errors.AsType[exitCode](err); ok {
 		sink(e)
@@ -74,6 +53,42 @@ func Execute() int {
 		return 1
 	}
 	return 0
+}
+
+// Command returns the proxbase command tree. Execute runs it; release tooling
+// generates man pages and shell completions from it.
+func Command() *cobra.Command {
+	var format string
+	root := &cobra.Command{
+		Use:   "proxbase",
+		Short: "Proxmox VE clusters in QEMU/KVM, for labs and CI",
+		Long: `Proxbase starts every node of a Proxmox VE cluster as a QEMU/KVM virtual machine,
+installs it from the official ISO with the automated installer and joins the nodes
+through the Proxmox API, with ZFS or Ceph storage, internal networks and an API token.
+It needs no root: only KVM access and qemu-img.
+
+Clusters are fixtures for labs, demos and CI: snapshot and reset them, break them with
+fault injection, and let AI agents drive them through the MCP server (proxbase mcp).
+
+Documentation: https://github.com/virtbase/proxbase/tree/main/docs`,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		PersistentPreRunE: func(*cobra.Command, []string) error {
+			switch format {
+			case "text":
+			case "json":
+				sink = progress.JSON(os.Stderr)
+			default:
+				return fmt.Errorf("--progress must be text or json")
+			}
+			return nil
+		},
+	}
+	root.PersistentFlags().StringVar(&format, "progress", "text", "progress and messages on stderr: text or json (one JSON object per line)")
+	root.AddCommand(createCmd(), listCmd(), statusCmd(), startCmd(), stopCmd(), destroyCmd(),
+		upCmd(), nodeCmd(), snapshotCmd(), faultCmd(), imageCmd(), sshCmd(), consoleCmd(),
+		envCmd(), tokenCmd(), cpCmd(), ttlCmd(), gcCmd(), doctorCmd(), configCmd(), upgradeCmd(), versionCmd(), switchCmd(), mcpCmd())
+	return root
 }
 
 // exitCode ends a command that did its job with a non-zero exit code and a done

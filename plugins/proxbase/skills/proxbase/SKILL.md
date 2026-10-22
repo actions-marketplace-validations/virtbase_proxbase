@@ -45,6 +45,9 @@ The proxbase MCP tools (`cluster_*`, `node_exec`, `pve_get`, `pve_call`, `task_*
        ceph: {enabled: true}
      ```
 
+   - Fixtures: `templates` in the cluster file provide VM templates from cloud images
+     (`{name: debian-13, image: debian-13, vmid: 9000}`) and container templates
+     (`containers: [debian-13-standard]`), downloaded once and cached on the host.
    - Each new cluster gets its own free port range; `cluster_plan` shows the ports,
      the memory and disk a create needs and what the host has, without creating.
 3. **Connect the code under test** with `cluster_env`: endpoint, API token,
@@ -60,6 +63,7 @@ The proxbase MCP tools (`cluster_*`, `node_exec`, `pve_get`, `pve_call`, `task_*
 5. **When something fails, diagnose before guessing.** `cluster_diagnose` returns,
    per node, quorum, failed units, failed tasks, errors of corosync, pmxcfs,
    pveproxy, pvedaemon, HA and Ceph, the clock offset and `ceph health detail`.
+   Host logs (serial consoles, installer) are resources `proxbase://clusters/<c>/logs/<file>`.
    Recent failed tasks: `task_list {"errorsOnly": true}`; a task's log: `task_log`;
    a task `pve_call` left running: `task_wait`.
 6. **Reset between iterations.** `cluster_reset` returns to `baseline` in seconds
@@ -73,12 +77,17 @@ The proxbase MCP tools (`cluster_*`, `node_exec`, `pve_get`, `pve_call`, `task_*
 
 - Do not destroy, reset or break clusters you did not create without asking: they
   may hold someone's work.
+- If a tool you need is missing, the user may run the server with `--read-only` or
+  `--toolsets`; say which tool you need instead of working around it.
 - Tool calls return before the client's timeout (50 s for clients other than Claude
   Code). `running: true` means call `cluster_wait`; `cluster_start` with
   `healthy: false` and "still starting" means poll `cluster_status`. In `node_exec`,
   run long commands in the background (`nohup cmd >/root/job.log 2>&1 &`) and poll.
 - The API token has full privileges on the lab cluster; the root password is only
   returned with `includeRootPassword`. Keep credentials out of commits and answers.
+  To test with least privilege (or that an operation is refused), create a scoped
+  token with `token_create {"name": "ro", "role": "PVEAuditor"}` and pass its
+  `apiToken` (or `cluster_env {"token": "ro"}`) to the code under test.
 - Guests inside the nodes use nested virtualization: keep them small (512 MiB to
   1 GiB) so a 4 GiB node can run them.
 - Faults (`fault_apply`) stay until `fault_clear`; killed nodes need `cluster_start`.
@@ -98,7 +107,8 @@ The proxbase MCP tools (`cluster_*`, `node_exec`, `pve_get`, `pve_call`, `task_*
 | `cluster_list`, `cluster_status` | `proxbase list`, `proxbase status <c> [-o json] [--check]` |
 | `cluster_plan` | `proxbase create <c> --nodes 3 --dry-run` |
 | `cluster_create` + `cluster_wait` | `proxbase create <c> --nodes 3 --golden --snapshot baseline --ttl 4h` (blocks) |
-| `cluster_env` | `proxbase env <c> [--format shell\|json\|terraform]` |
+| `cluster_env` | `proxbase env <c> [--format shell\|json\|terraform] [--token <name>]` |
+| `token_create`, `token_list`, `token_delete` | `proxbase token create <c> <name> --role PVEAuditor --path /` |
 | `node_exec` | `proxbase ssh <c> <node> -- <command>` |
 | `file_put`, `file_get` | `proxbase cp <file> <c>:<node>:/path`, `proxbase cp <c>:<node>:/path <file>` |
 | `node_add`, `node_remove` | `proxbase node add <c> --count 1`, `proxbase node remove <c> <node>` |

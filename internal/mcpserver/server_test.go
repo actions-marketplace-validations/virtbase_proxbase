@@ -72,15 +72,30 @@ func connect(t *testing.T) (*mcp.ClientSession, *progressLog) {
 // connectAs connects a client with the given clientInfo name to a server with opts.
 func connectAs(t *testing.T, client string, opts Options) (*mcp.ClientSession, *progressLog) {
 	t.Helper()
+	return connectWith(t, client, opts, nil, nil)
+}
+
+// connectWith is connectAs with client and session options; the progress
+// handler of copts is replaced.
+func connectWith(t *testing.T, client string, opts Options, copts *mcp.ClientOptions, sopts *mcp.ClientSessionOptions) (*mcp.ClientSession, *progressLog) {
+	t.Helper()
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	ctx := context.Background()
 	st, ct := mcp.NewInMemoryTransports()
-	if _, err := New("test", nil, opts).Connect(ctx, st, nil); err != nil {
+	srv, err := New("test", nil, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.Connect(ctx, st, nil); err != nil {
 		t.Fatal(err)
 	}
 	p := &progressLog{}
-	cs, err := mcp.NewClient(&mcp.Implementation{Name: client}, &mcp.ClientOptions{ProgressNotificationHandler: p.add}).Connect(ctx, ct, nil)
+	if copts == nil {
+		copts = &mcp.ClientOptions{}
+	}
+	copts.ProgressNotificationHandler = p.add
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: client}, copts).Connect(ctx, ct, sopts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +182,7 @@ func TestTools(t *testing.T) {
 		names = append(names, tool.Name)
 	}
 	for _, want := range []string{"cluster_list", "cluster_status", "cluster_plan", "cluster_create", "cluster_wait", "cluster_start", "cluster_stop",
-		"cluster_destroy", "cluster_ttl", "cluster_gc", "cluster_reset", "node_exec", "node_add", "node_remove", "file_put", "file_get", "image_list", "image_prune", "host_check", "cluster_diagnose", "pve_get", "pve_call", "task_list", "task_log", "task_wait", "cluster_env", "snapshot_save", "snapshot_restore", "snapshot_list", "fault_apply", "fault_clear", "config_validate"} {
+		"cluster_destroy", "cluster_ttl", "cluster_gc", "cluster_reset", "node_exec", "node_add", "node_remove", "file_put", "file_get", "image_list", "image_prune", "host_check", "cluster_diagnose", "pve_get", "pve_call", "task_list", "task_log", "task_wait", "token_create", "token_list", "token_delete", "cluster_env", "snapshot_save", "snapshot_restore", "snapshot_list", "fault_apply", "fault_clear", "config_validate"} {
 		if !slices.Contains(names, want) {
 			t.Errorf("tool %s missing (have %v)", want, names)
 		}

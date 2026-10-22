@@ -66,11 +66,12 @@ flowchart TD
 | `remote` | SSH to nodes through the forwarded ports |
 | `retry` | Retry with timeout, interval and permanent errors |
 | `golden` | Cached base images: build, bake, and the personalization of clones from older images |
+| `guestimage` | Download, verify and cache the cloud images and container templates of `templates` |
 | `cluster` | Orchestration: create, lifecycle, nodes, snapshots, faults, status, exec |
 | `progress` | Progress events and sinks: text, JSON lines, MCP notifications |
 | `job` | Runs a create or node change detached from its caller, with a JSON-lines progress log |
 | `doctor` | Host checks of `proxbase doctor` and the `host_check` tool |
-| `mcpserver` | MCP server (`proxbase mcp`): tools, the schema resource, progress forwarding |
+| `mcpserver` | MCP server (`proxbase mcp`) over stdio or Streamable HTTP with a bearer token: tools in toolsets, prompts, resources and completions, progress forwarding, call limits, elicitation, read-only mode and the audit log |
 | `selfupdate` | `proxbase upgrade`: find a GitHub release, verify it (SHA-256, cosign), detect package-manager installs, replace the binary atomically |
 | `cli` | Commands, flags and output |
 
@@ -79,6 +80,10 @@ optionally `vm.FaultInjector` for `proxbase fault`), a new
 storage backend implements `storage.Backend` (plus optional `Waiter`,
 `StopPreparer`, `NodeRemover`, `HealthReporter`), and a different network backend
 (for example host bridges) would replace `network.Switch`.
+
+Outside the binary, `cmd/gendist` generates what releases ship next to it: man pages
+and shell completions from the command tree (`cli.Command`), the AppStream metainfo
+from `packaging/` and the Debian changelog ([releasing](releasing.md)).
 
 ## Create
 
@@ -106,6 +111,7 @@ sequenceDiagram
     CLI->>Node: wait for quorum and a writable /etc/pve, repair lost node certificates
     CLI->>API: storage backends: ZFS pools / Ceph
     CLI->>API: API token, export CA
+    CLI->>Node: templates: upload cached images, qm create + qm template, container templates
     CLI->>Node: end provisioning mode
 ```
 
@@ -190,6 +196,10 @@ server process, guarded by the same cluster lock as the CLI.
 - During setup the API client pins each node's certificate fingerprint (read over
   SSH); afterwards clients verify against the exported cluster CA, ignoring the host
   name because nodes are reached through `127.0.0.1`.
+- The main API token `proxbase@pve!api` has Administrator on `/`. Scoped tokens
+  (`proxbase token`) belong to the same user with privilege separation, so each may
+  only use the one role granted to it on its path; their values are stored in
+  `secrets/token-<name>`.
 
 ## State on disk
 
@@ -203,10 +213,13 @@ server process, guarded by the same cluster lock as the CLI.
 ├── run/                pidfiles, QMP/console sockets, switch and NIC sockets
 └── logs/               install, console, QEMU and switch logs
 ~/.local/share/proxbase/new.lock   held while a new cluster chooses its ports
+~/.local/share/proxbase/mcp-token  bearer token of proxbase mcp --http (0600)
 ~/.local/share/proxbase/jobs/  <cluster>.jsonl, .pid, .cmd, .yaml of jobs started over MCP
 ~/.cache/proxbase/iso/     ISOs, SHA256SUMS, extracted installer files
 ~/.cache/proxbase/images/  golden base images (create --golden)
 ~/.cache/proxbase/apt/     packages served to the nodes (unused for 30 days: removed)
+~/.cache/proxbase/cloud/   cloud images for VM templates, by checksum
+~/.cache/proxbase/containers/  container templates and their index entries
 ```
 
 Design decisions and measurements are in [research/feasibility.md](research/feasibility.md).

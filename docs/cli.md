@@ -75,8 +75,9 @@ See [fault-injection.md](fault-injection.md).
 | `ssh [cluster] [node] [-- command…]` | SSH as root (default: first node) |
 | `cp <source> <destination>` | Copy a file to or from a node: `[cluster:]node:/path`, a local path or `-` (`--mode`) |
 | `console [cluster] <node>` | Serial console, Ctrl-] to detach |
-| `env [cluster]` | API endpoint and credentials: `--format shell\|json\|terraform`, `--export <dir>` |
-| `mcp` | MCP server on stdio for AI agents (`--call-timeout`, see [mcp.md](mcp.md#call-timeouts)) |
+| `env [cluster]` | API endpoint and credentials: `--format shell\|json\|terraform`, `--export <dir>`, `--token <name>` for a scoped token |
+| `token create\|list\|delete [cluster] <name>` | Scoped API tokens: one role on one path (`--role PVEAuditor`, `--path /vms/100`, `--no-propagate`); `create` prints `tokenId=secret` |
+| `mcp` | MCP server on stdio for AI agents: `--call-timeout` ([call timeouts](mcp.md#call-timeouts)), `--read-only`, `--toolsets`, `--audit-log` ([security](mcp.md#security)); `--http ADDR` with `--token-file`, `--tls-cert`, `--tls-key` serves [remote agents](mcp.md#remote-agents-http) |
 
 ## Host and files
 
@@ -90,7 +91,7 @@ See [fault-injection.md](fault-injection.md).
 | `config schema` | Print the JSON schema |
 | `upgrade` | Upgrade proxbase itself to the latest release (`--version`, `--check`, `--yes`, `--allow-downgrade`, `--signature auto\|require\|skip`); see [upgrading](install.md#upgrading) |
 | `version` | Print the version |
-| `completion <shell>` | Shell completion script |
+| `completion <shell>` | Shell completion script (the packages and Homebrew install them; see [installing](install.md#man-pages-and-completions)) |
 
 `upgrade --check` exits with 0 when proxbase is up to date and 100 when a newer
 release exists, 1 on errors; `upgrade` without a terminal needs `--yes`. Installs that

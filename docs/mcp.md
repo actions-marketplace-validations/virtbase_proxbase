@@ -79,7 +79,7 @@ Clusters created in the container live in the `proxbase` volume; use
 | `cluster_wait` | Keep waiting for a create that is still running |
 | `cluster_start`, `cluster_stop` | Boot or shut down all nodes |
 | `cluster_ttl`, `cluster_gc` | Set a cluster's lifetime (`minutes`, 0: never); delete every expired cluster (`dryRun`) |
-| `cluster_destroy` | Delete a cluster; `confirm` must repeat the cluster name |
+| `cluster_destroy` | Delete a cluster; `confirm` must repeat the cluster name, or the client asks the user ([elicitation](#prompts-resources-and-elicitation)) |
 | `node_exec` | Run a command as root on a node; returns `stdout`, `stderr`, `exitCode` |
 | `file_put`, `file_get` | Write a file on a node (text or base64, up to 4 MiB, replaced atomically) or read one (`maxBytes`, default 256 KiB) |
 | `node_add`, `node_remove` | Grow or shrink a cluster as a [background job](#background-jobs); `node_remove` needs `confirm` set to the node name |
@@ -88,7 +88,8 @@ Clusters created in the container live in the `proxbase` volume; use
 | `task_list` | Proxmox VE tasks of every node or one, newest first; filters `errorsOnly`, `running`, `type`, `vmid`, `sinceMinutes` |
 | `task_log` | Status and the last `lines` of a task's log, by UPID |
 | `task_wait` | Wait for a task to end; returns its exit status and log, a failed task is an error |
-| `cluster_env` | API endpoint, token, CA certificate, SSH key and ports; root password only with `includeRootPassword` |
+| `cluster_env` | API endpoint, token, CA certificate, SSH key and ports; root password only with `includeRootPassword`; `token` returns a scoped token instead of the main one |
+| `token_create`, `token_list`, `token_delete` | Scoped API tokens with privilege separation: `role` on `path` (e.g. `PVEAuditor` on `/`, `PVEVMAdmin` on `/vms/100`), for least-privilege tests |
 | `snapshot_save`, `snapshot_restore`, `snapshot_delete`, `snapshot_list` | Snapshots of the stopped cluster, or with `live` of the running cluster including memory (restoring resumes it) |
 | `cluster_reset` | Back to a snapshot (default `baseline`) in one call: power off, restore, start or resume; returns the status |
 | `fault_apply`, `fault_clear` | kill, freeze, thaw, link-down/up, partition, degrade |
@@ -99,6 +100,65 @@ Clusters created in the container live in the `proxbase` volume; use
 The resource `https://proxbase.virtbase.com/schema/v1alpha1/cluster.json` is the JSON
 schema of cluster files. Tool annotations mark read-only and destructive tools, so
 clients can ask before `cluster_destroy`, `snapshot_restore`, `fault_apply` or `pve_call`.
+
+## Prompts, resources and elicitation
+
+Prompts are workflows that clients offer as slash commands (in Claude Code
+`/mcp__proxbase__test-loop`):
+
+| Prompt | Arguments | Does |
+| --- | --- | --- |
+| `test-loop` | `task`, `cluster`, `nodes` | Reuse or create a cluster with a baseline, test, diagnose failures, reset between runs |
+| `diagnose` | `cluster` | Find out why a cluster is unhealthy without changing it, and propose a fix |
+| `ha-failover` | `cluster` | Put a VM under HA, kill its node and report the recovery timeline |
+
+Resource templates serve what an agent may want to read in full:
+
+| URI | Content |
+| --- | --- |
+| `proxbase://clusters/{cluster}/status` | The status as `cluster_status` returns it (JSON) |
+| `proxbase://clusters/{cluster}/logs/{file}` | The end (256 KiB) of a host log: `<node>-console.log`, `<node>-install.log`, `<node>-qemu.log`, `switch.log` |
+| `proxbase://jobs/{cluster}/log` | The progress events of the latest background job (JSON lines) |
+
+`cluster_diagnose` links the host logs as resources, and prompt and resource
+arguments complete cluster, node and file names. Without `confirm`,
+`cluster_destroy` and `node_remove` ask the user to confirm if the client supports
+elicitation (clients of protocol 2026-07-28 get an input request and call again).
+Tools with large results (`node_exec`, `cluster_diagnose`, `pve_get`, `task_log`,
+`file_get`) set `anthropic/maxResultSizeChars` so Claude Code shows them inline.
+
+## Remote agents (HTTP)
+
+Agents that run elsewhere, such as cloud agents or sandboxes without KVM, reach a
+proxbase host over Streamable HTTP:
+
+```bash
+proxbase mcp --http 127.0.0.1:8765          # token generated once: ~/.local/share/proxbase/mcp-token
+proxbase mcp --http 0.0.0.0:8765 --tls-cert cert.pem --tls-key key.pem --token-file token
+```
+
+- Every request needs `Authorization: Bearer <token>` (compared in constant time).
+  Off loopback, TLS is required, so the token and cluster credentials never cross
+  a network in clear text. The SDK's DNS rebinding protection and Go's
+  cross-origin protection guard the loopback listener against browsers.
+- The tools, prompts and resources are the same as over stdio, and so are the
+  flags (`--read-only`, `--toolsets`, `--audit-log`, `--call-timeout`); progress
+  notifications stream in the responses.
+- `cluster_env` returns endpoints on the proxbase host (`127.0.0.1`): a remote agent
+  uses the cluster through `pve_get`, `pve_call`, `node_exec` and `file_*`, or the
+  clusters set `access.bindAddress` to an address it can reach.
+
+Claude Code and Codex:
+
+```bash
+claude mcp add --transport http proxbase https://lab-host:8765/mcp --header "Authorization: Bearer $(cat token)"
+```
+
+```toml
+[mcp_servers.proxbase]
+url = "https://lab-host:8765/mcp"
+bearer_token_env_var = "PROXBASE_MCP_TOKEN"
+```
 
 ## Skill and plugin
 
@@ -193,10 +253,25 @@ agent → cluster_destroy {"cluster": "lab", "confirm": "lab"}
 ## Security
 
 The server runs with the rights of the user who starts it and can create VMs,
-run commands as root inside them and delete clusters. It only talks to its client
-over stdio and opens no network port. `cluster_env` returns the API token (full
+run commands as root inside them and delete clusters. Over stdio it only talks to
+its client and opens no network port; with `--http` see
+[remote agents](#remote-agents-http). `cluster_env` returns the API token (full
 privileges on the lab cluster) and, on request, the root password; treat the
-conversation accordingly. Progress and errors are logged to stderr.
+conversation accordingly. To give code under test less, hand it a scoped token from
+`token_create`. Progress and errors are logged to stderr.
+
+Limit what an agent may do with flags of `proxbase mcp`:
+
+| Flag | Effect |
+| --- | --- |
+| `--read-only` | Only tools that change nothing: status, plans, diagnosis, logs, API reads, `file_get`. The server instructions tell the agent so |
+| `--toolsets cluster,api` | Only these groups: `cluster` (lifecycle, status, env, reset, lifetime), `node` (exec, files, add/remove), `api` (`pve_*`, tasks, tokens), `snapshot`, `fault`, `host` (images, `host_check`, `config_validate`) |
+| `--audit-log FILE` | Appends one JSON line (time, client, tool, arguments with long values cut, error, seconds) per call of a tool that changes something; mode 0600 |
+
+```bash
+claude mcp add proxbase-ro -- proxbase mcp --read-only
+claude mcp add proxbase -- proxbase mcp --toolsets cluster,api,snapshot --audit-log ~/.local/state/proxbase-mcp.jsonl
+```
 
 ## MCP registry
 
